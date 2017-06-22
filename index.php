@@ -5,6 +5,7 @@ const DB_USER = 'homestead';
 const DB_PWD = 'secret';
 const DB_NAME = 'privet_mobile';
 #endregion
+
 #region Class Item
 class Item
 {
@@ -41,9 +42,29 @@ class Item
     return static::$_connection;
   }
 
-  public static function getAll() : array
+  public static function getTree() : array
   {
-    return static::connection()->query('select * from item', PDO::FETCH_ASSOC)->fetchAll();
+    $arr = static::connection()->query('select * from item', PDO::FETCH_ASSOC)->fetchAll();
+    $new = array();
+    foreach ($arr as $a){
+      $new[$a['parent']][] = $a;
+    }
+    return static::createNode($new, array($arr[0]));
+  }
+
+  private static function createNode(&$list, $parent){
+    $tree = array();
+    foreach ($parent as $k=>$l){
+      $l['text'] = $l['name'];
+      $l['state'] = ["opened" => true];
+      unset($l['parent']);
+      unset($l['name']);
+      if(isset($list[$l['id']])){
+        $l['children'] = static::createNode($list, $list[$l['id']]);
+      }
+      $tree[] = $l;
+    }
+    return $tree;
   }
   #region Delete/Create/Update
   public static function delete(int $id) : int
@@ -51,35 +72,31 @@ class Item
     if ($id < 1) {
       throw new Exception('Can not delete item with id = '.$id);
     }
-    return static::connection()->exec('delete from item where id='.$id);
+    return static::connection()->exec('delete from item where parent='.$id) +
+      static::connection()->exec('delete from item where id='.$id);
   }
 
-  public function save(int $id = -1) : bool
-  {
-    if ($id == -1) {
-      return $this->create();
-    }
-    else if ($id < 1) {
-      throw new Exception('Can not change item with id = '.$id);
-    }
-    $this->id = $id;
-    return $this->update();
-  }
-
-  protected function create() : bool
+  public function create() : int
   {
     $this->validateAll();
+    static::connection()->beginTransaction();
     $stmt = static::connection()->prepare('insert into item (name, parent) values (:name, :parent)');
     $stmt->bindParam(':name', $this->name, PDO::PARAM_STR);
     $stmt->bindParam(':parent', $this->parent, PDO::PARAM_INT);
-    return $stmt->execute();
+    $stmt->execute();
+    $id = static::connection()->lastInsertId();
+    static::connection()->commit();
+    return $id;
   }
 
-  protected function update() : bool
+  public function update(int $id) : bool
   {
+    if ($id < 1) {
+      throw new Exception('Can not change item with id = '.$id);
+    }
     $this->validateName();
-    $stmt = static::connection()->prepare('update item set (name=:name) where id=:id');
-    $stmt->bindParam(':id', $this->id, PDO::PARAM_INT);
+    $stmt = static::connection()->prepare('update item set name=:name where id=:id');
+    $stmt->bindParam(':id', $id, PDO::PARAM_INT);
     $stmt->bindParam(':name', $this->name, PDO::PARAM_STR);
     return $stmt->execute();
   }
@@ -94,7 +111,7 @@ class Item
   }
   public function validateParent() : bool
   {
-    if ($this->parent < 0) {
+    if ($this->parent < 1) {
       throw new Exception('Parent index can not be lower then 0.');
     }
     return true;
@@ -106,16 +123,22 @@ class Item
   #endregion
 }
 #endregion
+
 /** @var mixed $response */
+
 try {
   $id = (int)($_GET['id'] ?? -1);
   switch ($_SERVER['REQUEST_METHOD']) {
     case 'GET':
-      $response = Item::getAll();
+      $response = Item::getTree();
       break;
     case 'POST':
       $item = Item::fromRequest();
-      $response = $item->save($id);
+      $response = $item->create();
+      break;
+    case 'PUT':
+      $item = Item::fromRequest();
+      $response = $item->update($id);
       break;
     case 'DELETE':
       $response = Item::delete($id);
@@ -123,6 +146,8 @@ try {
   }
 }
 catch (Exception $e) {
+  http_response_code(400);
   $response = ['error'=> $e->getMessage()];
 }
+header('Content-type: application/json');
 echo json_encode($response);
